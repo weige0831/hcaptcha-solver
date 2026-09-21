@@ -35,6 +35,9 @@ from PIL import Image
 OUT = "research_out/grid3"
 CELL = 88
 
+# 「真的是格状图吗」的闸门：格内白方块底占比的中位数下限（实测取 0.40）
+GRID_BRIGHT_MIN = 0.40
+
 
 def crop_puzzle(arr):
     rgb = arr[:, :, :3].copy()
@@ -112,6 +115,33 @@ def build_cells(rgb, blobs, n=4, debug=True):
             x0, y0 = int(cx - side / 2), int(cy - side / 2)
             cells[(r, c)] = {"cx": cx, "cy": cy, "x": x0, "y": y0,
                              "w": int(side), "h": int(side)}
+
+    # ---- 关键校验：这图像真的是「格状」吗？----
+    # 踩过的坑：本函数会**强行**把 4x4 格阵套到任何图上有 >=8 个饱和块的图上。
+    # 散点火箭图的背景（星云）本身就是高饱和块，于是被套出 16 个"格子"，
+    # 判据再从这些空格子里挑 2 个点出去 —— 点的是空白背景，必然失败。
+    # 实测判别依据：格状题每格是**白色方块底**（亮且低饱和占比高、暗占比极低），
+    # 散点题是**深空背景**。实测值：
+    #     pat_01 白底 0.579 / 暗 0.016      pat_04 白底 0.563 / 暗 0.026
+    #     trial_01（实为散点）白底 0.201 / 暗 0.682
+    # 故用「白底占比中位 > 0.40」作为闸门。
+    bright = []
+    for t in cells.values():
+        p = cell_patch(rgb, t, size=48)
+        if p is None:
+            bright.append(0.0)
+            continue
+        hsv = cv2.cvtColor(p, cv2.COLOR_RGB2HSV)
+        s, v = hsv[:, :, 1].astype(np.int32), hsv[:, :, 2].astype(np.int32)
+        bright.append(float(((v > 200) & (s < 60)).mean()))
+    med_bright = float(np.median(bright)) if bright else 0.0
+    if debug:
+        print(f"  白底占比中位 {med_bright:.3f} (格状应 >0.40)")
+    if med_bright <= GRID_BRIGHT_MIN:
+        if debug:
+            print(f"  ✗ 判定为**非格状**（白底占比 {med_bright:.3f} <= "
+                  f"{GRID_BRIGHT_MIN}），拒绝套格")
+        return None, None
     return cells, (col_x, row_y, side)
 
 
