@@ -260,7 +260,18 @@ class HCaptchaSolver:
         return ""
 
     def _get_token(self, page) -> str:
-        """从回调写入的 textarea / 全局变量取 token"""
+        """
+        从回调写入的 textarea / 输入框取 token。
+
+        注意：**主路径是读 DOM**（textarea / input）。最后那条读 `window._token`
+        的兜底路径实际**永远不会生效** —— playwright 的 `page.evaluate` 跑在隔离
+        世界，读不到页面里定义的 JS 全局变量（已由 tools/verify_token_detector.py
+        实测确认）。保留它只是无害的历史残留，不要当作保险。
+
+        本方法的可靠性已单独校验：构造"已解出"的页面能读到正确 token，
+        未解出的页面能正确判失败（见 tools/verify_token_detector.py）——
+        这一条很关键，因为本仓库所有"成功率 0%"都出自这个判据。
+        """
         try:
             for sel in ("textarea[name='h-captcha-response']",
                         "input[name='h-captcha-response']",
@@ -273,6 +284,7 @@ class HCaptchaSolver:
                 val = el.input_value() if tag == "TEXTAREA" else el.get_attribute("value")
                 if val and len(val) > 10:
                     return val
+            # 无效兜底（隔离世界读不到页面全局），保留仅为兼容，勿依赖
             val = page.evaluate("() => window._token || ''")
             if val and len(val) > 10:
                 return val
