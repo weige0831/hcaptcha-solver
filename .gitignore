@@ -24,3 +24,6 @@ Thumbs.db
 
 # 探查产物
 research_out/
+
+# 下载的模型权重
+models/
