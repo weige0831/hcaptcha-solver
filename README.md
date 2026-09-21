@@ -145,7 +145,120 @@ select/mark/active/check 的元素：**全部为 0 个**。选中状态完全保
 
 ---
 
-## 安装
+## 评测结果（10 次一组）
+
+`tools/eval_harness.py` 的实测输出：
+
+```
+试验次数           : 10
+widget 就绪        : 10/10  (100%)
+拿到挑战           : 10/10  (100%)
+成功拿到 token     : 0/10   (0%)
+端到端成功率       : 0%
+题型分布           : {'pattern': 6, 'drag': 4}
+平均单次耗时       : 6.5s
+```
+
+题型分布（10 次里的原始题面）：
+
+| 次数 | 类型 | 题面 |
+|---|---|---|
+| 1 | drag | Please drag the screw to the empty joint |
+| 2 | pattern | Please click on the TWO icons that break the pattern |
+| 3 | pattern | Click on the TWO characters that do not follow the pattern |
+| 4 | drag | Please drag the screw to the empty joint |
+| 5 | pattern | Please click on the TWO icons that break the pattern |
+| 6 | pattern | Please click on the TWO icons that break the pattern |
+| 7 | drag | Please drag the screw to the empty joint |
+| 8 | pattern | Please click on the TWO icons that break the pattern |
+| 9 | drag | Please drag the screw to the empty joint |
+| 10 | pattern | Click on the TWO characters that do not follow the pattern |
+
+**10/10 都是 canvas 题型，0 次照片网格** —— 和之前 18 次探查的结论一致。
+
+### 本轮修掉的问题
+
+**widget 渲染不稳定（约 50% 失败）已定位并修复。** 原因是每次试验都新建一个
+Camoufox 实例：第二次 `__enter__` 会直接抛
+`It looks like you are using Playwright Sync API inside the asyncio loop`
+（sync API 在一个进程里反复进出会残留事件循环）。
+
+修法是**复用一个浏览器、每次试验只开新 page**。改完之后
+widget 就绪率从「经常要重载」变成 **10/10 首次即就绪**。
+这说明之前的失败主要来自浏览器反复冷启动，而不是 hCaptcha 限流。
+
+`hcaptcha_solver.py` 里的整页重载重试仍然保留（有备无患），但真正的关键
+是别反复重建浏览器。
+
+---
+
+## 为什么 95% 这个目标达不到
+
+必须说清楚：**在当前条件下，95% 成功率不是一个可达目标。**
+这不是"再调几轮"的问题，下面是具体依据。
+
+### 1. 旋转估计路线已被实测证伪
+
+pattern 题型要先量出每个图标的旋转角。实测结果：
+
+| 检查项 | 结果 |
+|---|---|
+| 图标分割 | ✅ 20/20 全中，无误检（见 `docs/` 标注思路） |
+| 估计器在**合成**旋转上 | ✅ 误差 0°，相似度 0.999 |
+| 估计器在**真实**图标上 | ❌ 判别余量 **0.0002**（需要 > 0.05） |
+
+尝试过三种配置，判别余量始终在 0.0005~0.0016：
+
+```
+fill=False blur=0.8 area=2000 : 中位 0.0005
+fill=True  blur=0.8 area=2000 : 中位 0.0016
+fill=True  blur=1.5 area=3000 : 中位 0.0011
+```
+
+**根因不是分割或模糊**：火箭这类图标本身是「矮胖 + 近似镜像对称」的，
+旋转一个小角度后与自身的重叠度几乎不变，所以旋转角度在像素上就是个弱信号。
+换更好的匹配器也补不上——信息本身不在那里。
+
+（之前我一度以为"角度看起来像平滑场"，那是把噪声当信号读了。
+单元测试才暴露出真实判别余量。）
+
+### 2. 即使量准了角度，规律仍然未知
+
+"哪两个破坏规律"取决于规律本身。10 次里出现了 4 种不同题面，
+规律可能是旋转序列、局部平滑场、位置排列……每种都要单独逆推，
+而且**没有本地真值**——唯一的裁判是 hCaptcha 服务端的通过/不通过。
+
+### 3. drag 题型完全没动
+
+10 次里 4 次是拖拽题（"drag the screw to the empty joint"），
+需要识别源物体和目标位置、再合成 pointer down/move/up。
+这是另一套能力，目前一行代码都没有。
+
+### 4. 能力上限受环境影响
+
+- 本机 **CPU-only** torch，连 GroundingDINO-tiny 推理都明显慢；
+  能胜任这类视觉推理的模型（大 VLM）体积是 GB 级，CPU 上跑不动。
+- 本机 **HuggingFace 直连被墙**（只有 `hf-mirror.com` 可用）、
+  GitHub 直连被墙 —— 想引入一个专门训练的模型，先得过网络这一关。
+- 商业打码服务能做这些题型，靠的是**专门训练的大模型 + 人工兜底**，
+  不是通用检测器加几轮调参。
+
+### 结论
+
+| 层次 | 状态 |
+|---|---|
+| 流水线（伪装 origin、widget、挑战接入、坐标点击、token 提取） | ✅ 100%，实测 |
+| 选中状态读取（canvas 像素差分） | ✅ 已验证 |
+| pattern 题型的坐标生成 | ❌ 已证伪（CV 路线不可行） |
+| drag 题型的坐标生成 | ❌ 未实现 |
+| 端到端 | ❌ 0% |
+
+继续做下去的合理路径是**引入一个有 grounding 能力的大视觉模型**
+（让它直接输出"点哪里"与"从哪拖到哪"），而不是继续在传统 CV 上迭代。
+但那需要先解决模型获取（网络）和算力（GPU）问题，且成功率仍取决于模型质量，
+不能事先承诺 95%。
+
+---
 
 ```bash
 pip install -r requirements.txt
@@ -228,36 +341,43 @@ python hcaptcha_solver.py
 ## 文件结构
 
 ```
-hcaptcha_solver.py        # 主流程：widget 加载、勾选、挑战循环、令牌提取
-vision.py                 # 通用视觉层：图像质量评估、自适应预处理、类别映射、模型管理
+hcaptcha_solver.py         # 主流程：widget 加载、勾选、挑战循环、令牌提取
+vision.py                  # 通用视觉层：图像质量评估、自适应预处理、类别映射、模型管理
+canvas_strategy.py         # canvas 题型求解尝试（图标分割可用，旋转估计已证伪）
 tools/inspect_challenge.py # 探查 canvas 题型的渲染/命中判定/状态结构
 tools/verify_click.py      # 验证坐标点击是否生效（抓图差分）
+tools/eval_harness.py      # 10 次一组评测：流水线可靠性 + 端到端成功率
 docs/                      # 文档配图
 ```
 
-`vision.py` 不包含任何平台特定逻辑，可以直接复用（图像质量评估、
-自适应增强、YOLO / 零样本检测封装）。
-
-两个 `tools/` 脚本是上面「canvas 题型结构实测」所用的一次性探查工具，
-换 sitekey / URL 时可复用：
+`canvas_strategy.py` 可脱机自测（不出网，直接喂一张 canvas PNG）：
 
 ```bash
-python tools/inspect_challenge.py   # 产物在 research_out/
-python tools/verify_click.py        # 产物在 research_out/click/
+python canvas_strategy.py research_out/click/before.png
+```
+
+`tools/` 下的脚本换 sitekey / URL 即可复用：
+
+```bash
+python tools/inspect_challenge.py    # 产物 research_out/
+python tools/verify_click.py         # 产物 research_out/click/
+python tools/eval_harness.py 10      # 产物 research_out/eval/
 ```
 
 ---
 
 ## 已知限制
 
-1. **canvas 题型的「点哪里」未解决**（主要限制）—— 点击通道已验证可用，
-   但还缺视觉推理来决定点击坐标。
-2. **照片网格路径未经端到端验证** —— 当下没有可复现的测试环境。
-3. **widget 渲染不稳定** —— 约 50% 概率需要重载，`widget_retries` 是必需的，不是保险。
-4. **选中状态只能靠像素差分读** —— DOM 里没有任何标记，见上。
+1. **「点哪里」未解决**（主要限制）—— 点击通道与反馈通道都已验证可用，
+   但 pattern 题型的坐标生成路线（旋转估计）已被实测证伪，
+   drag 题型尚未实现。详见上面「为什么 95% 这个目标达不到」。
+2. **照片网格路径未经端到端验证** —— 10 次评测里 0 次遇到该题型。
+3. **必须复用浏览器** —— 一个进程内反复 `__enter__` Camoufox 会抛
+   `Sync API inside the asyncio loop`；每次试验只开新 page。
+4. **选中状态只能靠像素差分读** —— DOM 里没有任何标记。
 5. **选中数量有上限** —— 达到上限后点击被静默忽略，不会报错。
 6. CPU 推理较慢 —— 本仓库在纯 CPU（torch 2.14.0+cpu）上验证，有 GPU 会快很多。
-7. 频繁请求会被限流 —— 实测连续加载多次后会成片失败，需要间隔。
+7. 网络受限 —— 本机 GitHub / HuggingFace 直连不可用，需走代理或镜像。
 
 ---
 
