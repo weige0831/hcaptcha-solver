@@ -445,10 +445,24 @@ python tools/eval_harness.py 10      # 产物 research_out/eval/
 1. **「点哪里 / 从哪拖到哪」未解决**（主要限制）—— 点击与拖拽的**执行**都已验证
    可用，缺的是决定坐标的后端。pattern 题型的传统 CV 路线已量化证伪；
    本地小模型已实测排除；drag 题型的动作已实现并做了机制级验证。
-2. **drag 题型的 live 验证尚未完成** —— 动作本身已用自建 canvas 验证通过
-   （`tools/verify_drag_mechanism.py`，8 项检查全绿），但 hCaptcha 连续 28 道题
-   （10 次评测 + 18 次刷新）一次都没下发拖拽题，所以「hCaptcha 的 canvas 是否接受
-   这个手势」还没有实测过。题型是服务端随机决定的，碰不到就只能等。
+2. **drag 题型的 live 验证仍未完成** —— 动作本身已用自建 canvas 验证通过
+   （`tools/verify_drag_mechanism.py`，8 项检查全绿），但针对 hCaptcha 的
+   live 验证只有一次机会且当时瞄错了：
+
+   - 扫描 4 组配置（headless/humanize/换 sitekey/有头）共 45 道题，
+     **只有 1 道是拖拽题**，其余 44 道全是 pattern。所以拖拽题现在很稀有，
+     想复现一次不容易。
+   - 拿到的那一次得到 0 像素变化，我一度判断为"手势未被接收"。
+     **看了 before.png 才发现是我瞄错了**：这类题的布局是
+     **左侧面板放可拖拽方块（各带 Move 手柄）、右侧面板是白色虚线空轮廓**，
+     而我从画面正中起手 —— 那里是右侧面板的空白，根本没抓住东西。
+     所以 0 像素不能推出"手势未被接收"，这个结论已作废。
+   - 之后又扫了 30 次刷新想复现拖拽题以便按正确坐标重测，没再遇到。
+     `MockBackend` 的拖拽坐标已按实测布局改为「左侧方块 -> 右侧轮廓」，
+     下次遇到拖拽题即可直接验证。
+
+   参考图：`research_out/drag_sweep/C_headless_altsite/before.png`
+   （拖拽题真实布局），`research_out/click/before.png`（pattern 题）。
 3. **照片网格路径未经端到端验证** —— 实测里 0 次遇到该题型。
 4. **必须复用浏览器** —— 一个进程内反复 `__enter__` Camoufox 会抛
    `Sync API inside the asyncio loop`；每次试验只开新 page。

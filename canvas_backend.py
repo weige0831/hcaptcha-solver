@@ -90,10 +90,15 @@ class MockBackend(CanvasBackend):
         w, h = self._to_pil(image).size
         low = (prompt or "").lower()
         if "drag" in low or "into their outlines" in low:
-            # 从左上区域拖到右下区域，路径横跨画面，便于像素差分观察
+            # 实测布局（见 research_out/drag_sweep/C_headless_altsite/before.png）：
+            #   左侧面板 = 可拖拽的方块，每个带一个 "Move" 手柄
+            #   右侧面板 = 白色虚线空轮廓（拖放目标）
+            # 所以拖拽必须从左侧方块上起手、放到右侧轮廓上。
+            # 早先版本从画面正中起手，那里是右侧面板的空白，根本没抓住任何东西，
+            # 结果是 0 像素变化 —— 那是瞄错，不是手势没被接收。
             return {"clicks": [],
-                    "drag": [(w * 0.30, h * 0.35, w * 0.70, h * 0.70)],
-                    "confidence": None, "reasoning": "mock drag"}
+                    "drag": [(w * 0.135, h * 0.40, w * 0.600, h * 0.53)],
+                    "confidence": None, "reasoning": "mock drag: 左侧方块 -> 右侧虚线轮廓"}
         pts: List[Click] = []
         for i in range(self.n_points):
             frac = (i + 1) / (self.n_points + 1)
