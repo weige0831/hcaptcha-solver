@@ -1,0 +1,23 @@
+# 权重文件（约 109 MB，请按 README 自行下载）
+yolo11x.pt
+*.pt
+*.pth
+*.onnx
+
+# 运行产物
+debug_screenshots/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
