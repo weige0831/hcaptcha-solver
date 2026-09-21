@@ -1,0 +1,220 @@
+"""
+格状题型 live 测试：提取格子 -> 选异常 -> 点击 -> 提交 -> 读 hCaptcha 回执
+
+这是本次会话里第一次有了**可用的坐标生成**（针对格状子类）：
+`research/grid_cells3.py` 用「角色块质心反推格距」定出 4x4 格框，
+拼图核验（research_out/grid3/cells.png）确认每格取到一个完整角色。
+
+于是可以真正闭环了：把候选点按坐标点出去，让 hCaptcha 判对错。
+判据是服务端的通过/不通过 —— 这是唯一的真值来源。
+
+同时做一件之前做不到的事：**对比不同选点规则的表现**，因为单靠方差分析
+未必能定出"规律"到底是列重复还是别的。这里支持两种规则：
+    col   —— 与本列其它格最不像的那两个（列重复假设）
+    global—— 与全场所有格最不像的那两个（整体少数派假设）
+每道题只提交一次（提交会消耗题目），所以规则在题与题之间轮换。
+
+用法:
+    python tools/eval_grid.py 10            # 最多测 10 道格状题
+产物:
+    research_out/eval_grid/report.json / summary.txt
+"""
+
+from __future__ import annotations
+
+import base64
+import io
+import json
+import os
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import numpy as np
+from PIL import Image
+
+from hcaptcha_solver import (
+    HCaptchaSolver, HTML_TEMPLATE, CHALLENGE_IFRAME_SELECTOR, REFRESH_SELECTOR,
+)
+from canvas_actions import CanvasGeometry
+from research.grid_cells3 import find_blobs, build_cells, cell_patch, similarity, crop_puzzle
+
+OUT = os.path.join(os.environ.get("RESEARCH_OUT", "research_out"), "eval_grid")
+SITEKEY = "a5f74b19-9e45-40e0-b45d-47ff91b7a6c2"
+URL = "https://accounts.hcaptcha.com/demo"
+
+GET_CANVAS = r"""() => {
+    try {
+        const c = document.querySelector('canvas');
+        const r = c.getBoundingClientRect();
+        return {ok: true, data: c.toDataURL('image/png'),
+                rect: {x: r.x, y: r.y, w: r.width, h: r.height},
+                buf: {w: c.width, h: c.height}};
+    } catch (e) { return {ok: false, err: String(e)}; }
+}"""
+
+
+def pick_candidates(rgb_full, rule):
+    """返回 (候选[(x,y),...], 诊断信息)；坐标为裁剪后拼图区坐标"""
+    rgb, top = crop_puzzle(rgb_full)
+    blobs = find_blobs(rgb)
+    cells, geom = build_cells(rgb, blobs, 4, debug=False)
+    if not cells or len(cells) < 16:
+        return None, {"error": f"格提取不足 ({len(cells) if cells else 0})"}
+    patches = {k: cell_patch(rgb, t) for k, t in cells.items()}
+
+    def score(axis):
+        out = {}
+        for (r, c), p in patches.items():
+            others = [patches[q] for q in patches
+                      if (q[1] == c if axis == "col" else q[0] == r) and q != (r, c)]
+            if others:
+                out[(r, c)] = float(np.mean([similarity(p, o) for o in others]))
+        return out
+
+    sc, sr = score("col"), score("row")
+    col_comb = {k: (sc[k] + sr.get(k, sc[k])) / 2 for k in sc}
+
+    if rule == "col":
+        ranked = sorted(col_comb.items(), key=lambda kv: kv[1])
+    else:  # global：与全场所有其它格的平均相似度
+        g = {}
+        for k, p in patches.items():
+            others = [v for q, v in patches.items() if q != k]
+            g[k] = float(np.mean([similarity(p, o) for o in others]))
+        ranked = sorted(g.items(), key=lambda kv: kv[1])
+
+    picks = [k for k, _ in ranked[:2]]
+    pts = [(int(cells[k]["cx"]), int(cells[k]["cy"])) for k in picks]
+    diag = {"rule": rule, "picks": [list(k) for k in picks],
+            "top_scores": [round(v, 3) for _, v in ranked[:4]],
+            "n_cells": len(cells), "top": int(top)}
+    return pts, diag
+
+
+def main():
+    n_want = next((int(a) for a in sys.argv[1:] if a.isdigit()), 10)
+    os.makedirs(OUT, exist_ok=True)
+    records = []
+    dist = {}
+
+    solver = HCaptchaSolver(headless=True, widget_retries=3)
+    solver.__enter__()
+    try:
+        page = solver.browser.new_page()
+        html = HTML_TEMPLATE.replace("{{SITEKEY}}", SITEKEY)
+        for u in (URL, URL + "/", URL.rstrip("/")):
+            page.route(u, lambda r: r.fulfill(status=200, content_type="text/html", body=html))
+        widget = solver._wait_for_widget(page, URL, tries=12)
+        widget.evaluate("() => document.querySelector('#checkbox').click()")
+        print("widget 就绪", flush=True)
+
+        tried, rounds = 0, 0
+        while tried < n_want and rounds < n_want * 10:
+            rounds += 1
+            challenge = None
+            for _ in range(14):
+                time.sleep(1.4)
+                cf = solver._get_challenge_frame(page)
+                if cf:
+                    challenge = cf
+                    break
+            if not challenge:
+                continue
+            prompt = solver._read_prompt(challenge)
+            low = prompt.lower()
+            is_pat = ("pattern" in low or "does not follow" in low)
+            kind = "pattern" if is_pat else ("drag" if "drag" in low else "other")
+            dist[kind] = dist.get(kind, 0) + 1
+
+            if is_pat:
+                cap = challenge.evaluate(GET_CANVAS)
+                if not cap.get("ok"):
+                    continue
+                raw = base64.b64decode(cap["data"].split(",", 1)[1])
+                arr = np.asarray(Image.open(io.BytesIO(raw)))
+                rule = ["col", "global"][tried % 2]
+                pts, diag = pick_candidates(arr, rule)
+                if not pts:
+                    print(f"[{rounds:3d}] 跳过: {diag.get('error')}", flush=True)
+                else:
+                    tried += 1
+                    print(f"[{rounds:3d}] 第{tried}题 rule={rule} 格数={diag['n_cells']} "
+                          f"top分={diag['top_scores']}", flush=True)
+                    iframe_box = page.query_selector(CHALLENGE_IFRAME_SELECTOR).bounding_box()
+                    geom = CanvasGeometry(iframe_box, cap["rect"], (cap["buf"]["w"], cap["buf"]["h"]))
+                    top = diag.pop("top", 0)
+                    rec = {"trial": tried, **diag, "prompt": prompt}
+                    for (bx, by) in pts:
+                        px, py = geom.to_page(bx, by + top)
+                        page.mouse.move(px, py)
+                        page.mouse.click(px, py)
+                        time.sleep(0.35)
+                    challenge.evaluate(
+                        "() => { const b=document.querySelector('.button-submit'); if(b) b.click(); }")
+                    time.sleep(2.5)
+                    err = challenge.evaluate(
+                        "() => { const e=document.querySelector('.display-error');"
+                        " return e && e.offsetParent!==null ? e.innerText : null; }")
+                    rec["hcaptcha_error"] = err
+                    try:
+                        tok = solver._get_token(page)
+                        rec["solved"] = True
+                        rec["token_len"] = len(tok)
+                    except Exception:
+                        rec["solved"] = False
+                    records.append(rec)
+                    print(f"        提交回执={err!r}  解题={rec['solved']}", flush=True)
+                    if rec["solved"]:
+                        break
+
+            try:
+                challenge.evaluate(
+                    f"() => {{ const r=document.querySelector('{REFRESH_SELECTOR}'); if(r) r.click(); }}")
+            except Exception:
+                pass
+            time.sleep(2.0)
+    finally:
+        try:
+            solver.__exit__(None, None, None)
+        except Exception:
+            pass
+
+    ok = sum(1 for r in records if r.get("solved"))
+    summary = {"attempted": len(records), "solved": ok,
+               "success_rate": round(ok / len(records), 3) if records else 0.0,
+               "challenge_types": dist,
+               "by_rule": {}}
+    for rule in ("col", "global"):
+        sub = [r for r in records if r.get("rule") == rule]
+        if sub:
+            summary["by_rule"][rule] = {
+                "n": len(sub), "solved": sum(1 for r in sub if r.get("solved"))}
+
+    lines = [
+        f"题型分布           : {dist}",
+        f"格状题尝试次数     : {len(records)}",
+        f"成功拿到 token     : {ok}/{len(records)}"
+        + (f"  ({summary['success_rate']:.0%})" if records else ""),
+    ]
+    for rule, v in summary["by_rule"].items():
+        lines.append(f"  规则 {rule:7s}: {v['solved']}/{v['n']}")
+    if records:
+        lines.append("")
+        lines.append("各次回执:")
+        for r in records:
+            lines.append(f"  第{r['trial']}题 rule={r.get('rule')} "
+                         f"picks={r.get('picks')} 回执={r.get('hcaptcha_error')!r}")
+
+    with open(os.path.join(OUT, "report.json"), "w", encoding="utf-8") as f:
+        json.dump({"summary": summary, "records": records}, f, ensure_ascii=False, indent=2)
+    with open(os.path.join(OUT, "summary.txt"), "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    print("\n" + "\n".join(lines))
+    print(f"\n报告: {OUT}/report.json")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
