@@ -115,8 +115,21 @@ def pick_candidates(rgb_full, rule):
     axis = "col" if col_cons >= row_cons else "row"
     dev = col_dev if axis == "col" else row_dev
 
-    if rule == "axis":
+    if rule in ("axis", "second"):
         ranked = sorted(dev.items(), key=lambda kv: -kv[1])
+        if rule == "second":
+            # 「次强偏离」策略：检验"最极端的离群不是答案、中间档才是"这一假设。
+            # 对每条线取**第二强**偏离的格子，再在全部这些格子里取前 2。
+            per_line = {}
+            for k, v in dev.items():
+                per_line.setdefault(k[0] if axis == "row" else k[1], []).append((k, v))
+            cand = []
+            for _, lst in per_line.items():
+                lst.sort(key=lambda kv: -kv[1])
+                if len(lst) >= 2:
+                    cand.append(lst[1])
+            cand.sort(key=lambda kv: -kv[1])
+            ranked = cand + ranked
         picks = [k for k, _ in ranked[:2]]
         diag = {"rule": rule, "picks": [list(k) for k in picks],
                 "col_consistency": round(col_cons, 4),
@@ -198,7 +211,7 @@ def main():
                     continue
                 raw = base64.b64decode(cap["data"].split(",", 1)[1])
                 arr = np.asarray(Image.open(io.BytesIO(raw)))
-                rule = "axis"   # 本轮改用改进后的判据（先判方向自洽，再在该方向找偏离）
+                rule = os.environ.get("SOLVER_SELECT", "axis")   # axis=最极端离群；second=次强偏离
                 pts, diag = pick_candidates(arr, rule)
                 if not pts:
                     print(f"[{rounds:3d}] 跳过: {diag.get('error')}", flush=True)
