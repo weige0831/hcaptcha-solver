@@ -56,7 +56,19 @@ GET_CANVAS = r"""() => {
 
 
 def pick_candidates(rgb_full, rule):
-    """返回 (候选[(x,y),...], 诊断信息)；坐标为裁剪后拼图区坐标"""
+    """
+    返回 (候选[(x,y),...], 诊断信息)；坐标为裁剪后拼图区坐标
+
+    rule:
+      col/global —— 前两轮的规则（保留以便对比）
+      axis       —— 本轮新增：先判断规律在哪个方向自洽，再在该方向上找偏离
+
+    为什么要 axis：上一轮 0/10 的原因定位到"候选分几乎并列"。
+    回看唯一能肉眼核验的那道题（pat_01），发现按列看答案是清楚的
+    （列0 全绿 / 列1 全粉 / 列2 三兔一青 / 列3 三蓝一红 -> 异常就是那只青的和红的），
+    而我的分数把列与行平均了 —— **把一个自洽方向和一个不自洽方向混在一起**，
+    信号被稀释。所以改成：先估哪个方向自洽，只在该方向上算偏离。
+    """
     rgb, top = crop_puzzle(rgb_full)
     blobs = find_blobs(rgb)
     cells, geom = build_cells(rgb, blobs, 4, debug=False)
@@ -64,21 +76,73 @@ def pick_candidates(rgb_full, rule):
         return None, {"error": f"格提取不足 ({len(cells) if cells else 0})"}
     patches = {k: cell_patch(rgb, t) for k, t in cells.items()}
 
-    def score(axis):
+    # 16x16 相似度矩阵（对称）
+    keys = sorted(patches)
+    S = {k: {} for k in keys}
+    for i, a in enumerate(keys):
+        for b in keys[i + 1:]:
+            v = similarity(patches[a], patches[b])
+            S[a][b] = v
+            S[b][a] = v
+
+    def line_stats(axis):
+        """
+        对每条线(行或列)：
+          consens = 与线内其它格平均相似度最高的那个（代表该线的"主流角色"）
+          within  = 线内所有两两相似度的均值（衡量这条线有多自洽）
+          dev[k]  = 1 - 相似度(k, consens)
+        返回 (整体自洽度, {格: 偏离度})
+        """
+        within_all, dev = [], {}
+        for idx in range(4):
+            line = [k for k in keys if (k[1] if axis == "col" else k[0]) == idx]
+            if len(line) < 2:
+                continue
+            best_c, best_v = None, -1
+            for k in line:
+                others = [S[k][o] for o in line if o != k]
+                m = float(np.mean(others))
+                if m > best_v:
+                    best_v, best_c = m, k
+            within_all.append(best_v)
+            for k in line:
+                if k != best_c:
+                    dev[k] = 1.0 - S[k][best_c]
+        return float(np.mean(within_all)) if within_all else 0.0, dev
+
+    col_cons, col_dev = line_stats("col")
+    row_cons, row_dev = line_stats("row")
+    axis = "col" if col_cons >= row_cons else "row"
+    dev = col_dev if axis == "col" else row_dev
+
+    if rule == "axis":
+        ranked = sorted(dev.items(), key=lambda kv: -kv[1])
+        picks = [k for k, _ in ranked[:2]]
+        diag = {"rule": rule, "picks": [list(k) for k in picks],
+                "col_consistency": round(col_cons, 4),
+                "row_consistency": round(row_cons, 4),
+                "chosen_axis": axis,
+                "top_scores": [round(v, 4) for _, v in ranked[:4]],
+                "margin_2_3": round(ranked[2][1] - ranked[1][1], 4) if len(ranked) > 2 else None,
+                "n_cells": len(cells), "top": int(top)}
+        pts = [(int(cells[k]["cx"]), int(cells[k]["cy"])) for k in picks]
+        return pts, diag
+
+    # --- 旧规则（对比用）---
+    def score(axis_):
         out = {}
         for (r, c), p in patches.items():
             others = [patches[q] for q in patches
-                      if (q[1] == c if axis == "col" else q[0] == r) and q != (r, c)]
+                      if (q[1] == c if axis_ == "col" else q[0] == r) and q != (r, c)]
             if others:
                 out[(r, c)] = float(np.mean([similarity(p, o) for o in others]))
         return out
 
     sc, sr = score("col"), score("row")
-    col_comb = {k: (sc[k] + sr.get(k, sc[k])) / 2 for k in sc}
-
     if rule == "col":
-        ranked = sorted(col_comb.items(), key=lambda kv: kv[1])
-    else:  # global：与全场所有其它格的平均相似度
+        ranked = sorted({k: (sc[k] + sr.get(k, sc[k])) / 2 for k in sc}.items(),
+                        key=lambda kv: kv[1])
+    else:
         g = {}
         for k, p in patches.items():
             others = [v for q, v in patches.items() if q != k]
@@ -134,7 +198,7 @@ def main():
                     continue
                 raw = base64.b64decode(cap["data"].split(",", 1)[1])
                 arr = np.asarray(Image.open(io.BytesIO(raw)))
-                rule = ["col", "global"][tried % 2]
+                rule = "axis"   # 本轮改用改进后的判据（先判方向自洽，再在该方向找偏离）
                 pts, diag = pick_candidates(arr, rule)
                 if not pts:
                     print(f"[{rounds:3d}] 跳过: {diag.get('error')}", flush=True)
