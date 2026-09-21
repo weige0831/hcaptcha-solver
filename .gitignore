@@ -27,3 +27,6 @@ research_out/
 
 # 下载的模型权重
 models/
+
+# VLM 隔离环境
+.venv-vlm/

@@ -259,27 +259,47 @@ fill=True  blur=1.5 area=3000 : 中位 0.0011
 也就是说：**这个领域里最专注、维护最久的项目，最后也把难题交给托管的大型
 多模态 LLM 去解**。这和我本地三轮实验的结论一致。
 
-### 6. 本地小模型（Moondream2）实测：不可行
+### 6. 本地小模型（Moondream2）实测：已排除
 
-退一步试了能在本机 CPU 上跑的小 VLM（Moondream2，约 2B，带 pointing）：
+第一次测出的是乱码，但那是我这边的环境问题，不能当作能力结论。这轮把它修好并
+测出了真实数字。
 
-| 项目 | 结果 |
-|---|---|
-| 权重下载 | ✅ 3.59 GB，走 `hf-mirror.com`，字节校验一致 |
-| 加载 | ✅ 12.2s（需给远程代码打一个 `all_tied_weights_keys={}` 兼容补丁） |
-| 输出质量 | ❌ 完全退化 —— 全是 `1KeKeKeKeKe...` / `MerMerMerMer...` 这类复读 |
-| pointing | ❌ 返回 ~50 个几乎相同的坐标，全部堆在 (0.466, 0.466)，不是真实定位 |
-| 单次推理耗时 | ❌ **80~180 秒/次**（CPU） |
+**先修环境（记录以备复现）：**
 
-输出退化的原因是它被解析到了旧的 `moondream1` / `starmie-v1` 修订版
-（日志里明确提示 `using a model of type 'moondream1'`），与 transformers 5.17 不兼容，
-所以**这次测试不能用来判定"小模型能力够不够"**。
+| 问题 | 原因 | 处理 |
+|---|---|---|
+| 输出退化成复读（`1KeKeKeKe...`） | 模型 config 声明 `transformers_version: 4.52.4`，而主环境是 5.17.0 | 建隔离环境 `.venv-vlm` 装 transformers 4.52.4（不动主环境，避免影响 GroundingDINO） |
+| `FileNotFoundError: transformers_modules/moondream2/layers.py` | 动态模块缓存只拷进去 9/17 个 .py 文件 | 把本地模型目录的 `*.py` 同步进 `~/.cache/huggingface/modules/transformers_modules/moondream2/` |
 
-但即便修好兼容性，**速度这一条就已经判了死刑**：一次查询 1~3 分钟，
-而一道题往往要多次查询，hCaptcha 的挑战会超时。95% 成功率在本机 CPU 上没有可能。
+**修好之后的真实能力与耗时**（图缩到 448x313，CPU）：
+
+| 查询 | 回复 | 耗时 |
+|---|---|---|
+| How many rocket icons are in this image? | "There are fifteen rocket icons in the image." | 106.1s |
+| Which rocket icon is different from the others? | "Top center" | 115.5s |
+| `point("rocket that does not follow the pattern")` | **返回 15 个点**（前3: 0.42/0.82, 0.50/0.71, 0.59/0.82） | 185.4s |
+
+模型是**真的能看懂图**——能正确数出数量（15 个），说明之前那次乱码确实只是版本问题。
+
+但两点让它无法用于本题：
+
+1. **接口语义不对**。`point()` 是「实例定位」原语：给它一个名词，它返回该物体的
+   **全部**实例——所以问「不符合规律的那个」它返回了全部 15 个点。
+   它没有「推理出异常项」这个能力。真正的推理走 `query()`，而 `query()` 给出的是
+   "Top center" 这种**模糊散文**，不是可点击的两组坐标。
+2. **耗时不可接受**。448px 的小图单次 106~185s（CPU）。要组成「先定位 15 个图标、
+   再两两比较」的策略，需要约 190 次查询 —— 完全不现实；即便单次查询，
+   也可能撞上验证码的超时。
+
+**一个有意思的交叉验证**：模型对「哪个不一样」答 "Top center"，
+而我之前的像素分析里，偏离最大的也正是顶部中央那枚（bbox 139px vs 其余约 80px，
+相似度中位 0.420）。两个完全不同的方法指向同一个图标，说明它确实视觉上显著。
+但那只说明「它看起来不一样」，不等于「它就是题目要的那两个」——
+而后者需要真值，本机没有。
 
 （顺带记两个环境坑：`huggingface_hub` 的 `snapshot_download` 下 3.6GB 大文件会
-卡死，改用 `curl -C -` 续传能跑到 45MB/s；`models/` 已加入 `.gitignore`。）
+卡死，改用 `curl -C -` 续传能跑到 45MB/s；`models/` 与 `.venv-vlm/` 都已加入
+`.gitignore`。）
 
 ---
 

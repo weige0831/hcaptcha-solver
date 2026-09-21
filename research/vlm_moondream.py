@@ -42,6 +42,17 @@ def load_moondream(model_dir: str):
     import warnings
     warnings.filterwarnings("ignore")
     from transformers import AutoModelForCausalLM
+
+    # 先按原样加载：若 transformers 版本与模型声明的版本一致，不需要任何补丁。
+    # （模型的 config 里写着 transformers_version=4.52.4，用 4.52 跑即可。）
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_dir, trust_remote_code=True, local_files_only=True)
+        return model, []
+    except AttributeError as first_err:
+        print(f"  [信息] 直接加载失败，转补丁路径: {str(first_err)[:90]}")
+
+    # 回退：给远程类补 transformers 5.x 需要的内部属性
     from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
     cls = get_class_from_dynamic_module("hf_moondream.HfMoondream", model_dir)
