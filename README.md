@@ -679,12 +679,37 @@ export SOLVER_SERVICE_BASE=https://2captcha.com      # 可换成任意兼容镜�
 python tools/eval_service.py 10                      # 10 次一组如实报数
 ```
 
-已实现 2captcha 兼容协议（`in.php` / `res.php`），这是这类服务里被最广泛
-沿用的协议，换个 base_url 往往就能对接别家。无 key 时自检与错误处理路径均已验证：
+已实现**两套协议**，并把厂商相关的字段名全部做成可配置（`token_service.py`）：
+
+| 协议 | 端点 | 说明 |
+|---|---|---|
+| v2 任务式（默认首选） | `POST https://api.2captcha.com/createTask` + `getTaskResult` | 2captcha 现在主推；鉴权 `clientKey`，sitekey/url 放在 `task` 对象里（`websiteURL`/`websiteKey`） |
+| 老式 | `in.php` + `res.php` | 鉴权 `key`；`method` 与 sitekey 参数名可配 |
+
+默认 `auto`：先试 v2，失败自动回退老式 —— 两套协议接口主机与字段都不同，互为兜底。
+
+> ⚠️ **一个我无法核实的地方，请留意**：查公开文档时，2captcha 的 hCaptcha 专页返回 404，
+> 总览页只列了 reCAPTCHA 的写法（`method=userrecaptcha`，sitekey 传 `googlekey`），
+> **没有列出 hCaptcha 的方法名/task 类型**。所以默认值 `method=hcaptcha` 与
+> `type=HCaptchaTaskProxyless` 是按通用惯例填的，**未经真实验证**。
+> 因此所有相关名字都可覆盖，且 token 提取是递归找"像 token 的字段"，
+> 不写死字段名：
 
 ```bash
-python token_service.py     # 无需 key 的自检
+export SOLVER_SERVICE_API=auto|v2|legacy        # 协议选择
+export SOLVER_SERVICE_TASK=HCaptchaTaskProxyless # v2 的 task.type
+export SOLVER_SERVICE_METHOD=hcaptcha            # 老式的 method
+export SOLVER_SERVICE_SITEKEY_PARAM=sitekey      # 老式里 sitekey 的参数名
 ```
+
+**首次使用请先跑自检**，它会打印两套协议将要发出的请求体，便于对照服务商文档核对：
+
+```bash
+python token_service.py     # 无需 key；打印请求体 + 校验 token 提取的健壮性
+```
+
+若真实提交返回错误，错误码会原样带出（如 `ERROR_WRONG_USER_KEY`、`ERROR_UNKNOWN_METHOD`），
+据此调上面几个变量即可 —— 不需要改代码。
 
 这和我调研市面方案得到的结论是一致的：这个领域最专注的开源项目
 （hcaptcha-challenger）最后也把难题交给了托管大模型 —— 自建这条路
