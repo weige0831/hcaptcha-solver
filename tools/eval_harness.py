@@ -121,13 +121,16 @@ def run_trial(idx: int, solver, attempt_canvas: bool) -> dict:
             rec["solve_attempted"] = "grid"
             rec["note"] = "grid 路径未经验证"
         elif attempt_canvas:
-            rec["solve_attempted"] = "canvas"
+            rec["solve_attempted"] = "canvas-backend"
             try:
-                from canvas_strategy import analyze
                 import base64
+                import io as _io
                 import numpy as np
                 from PIL import Image
-                import io as _io
+
+                from canvas_backend import get_backend
+                backend = get_backend()
+                rec["backend"] = backend.name
 
                 cap = challenge.evaluate("""() => {
                     try {
@@ -141,22 +144,40 @@ def run_trial(idx: int, solver, attempt_canvas: bool) -> dict:
                 if not cap.get("ok"):
                     rec["error"] = "canvas_capture_failed"
                     return rec
-                raw = base64.b64decode(cap["data"].split(",", 1)[1])
-                arr = np.asarray(Image.open(_io.BytesIO(raw)))
-                rgb = arr[:, :, :3].copy()
-                alpha = arr[:, :, 3] if arr.shape[2] == 4 else None
-                res = analyze(rgb, alpha)
-                rec["icons_detected"] = len(res["icons"])
-                rec["outliers"] = res["outliers"]
-                rec["angle_scores"] = [round(i["angle_score"], 3) for i in res["icons"]]
 
-                iframe_box = page.query_selector(CHALLENGE_IFRAME_SELECTOR).bounding_box()
+                raw = base64.b64decode(cap["data"].split(",", 1)[1])
+                img_obj = Image.open(_io.BytesIO(raw)).convert("RGB")
+                # 裁掉顶部透明题面区，只把拼图区域交给后端
+                arr = np.asarray(Image.open(_io.BytesIO(raw)))
+                if arr.shape[2] == 4:
+                    rows = (arr[:, :, 3] > 10).sum(axis=1)
+                    nz = np.where(rows > 0)[0]
+                    top = int(nz.min()) if len(nz) else 0
+                else:
+                    top = 0
+                puzzle = img_obj.crop((0, top, img_obj.size[0], img_obj.size[1]))
+                rec["canvas_size"] = list(img_obj.size)
+                rec["puzzle_offset_y"] = top
+
+                out = backend.solve(puzzle, prompt)
+                rec["backend_clicks"] = [list(map(round, p)) for p in out.get("clicks", [])]
+                rec["backend_reasoning"] = out.get("reasoning")
+                rec["backend_confidence"] = out.get("confidence")
+
+                # 换算：后端坐标(图像像素) -> canvas 缓冲 -> CSS -> 页面
                 scale = cap["buf"]["w"] / cap["rect"]["w"]
-                for (bx, by) in res["click_points"]:
-                    ax = iframe_box["x"] + cap["rect"]["x"] + bx / scale
-                    ay = iframe_box["y"] + cap["rect"]["y"] + by / scale
+                iframe_box = page.query_selector(CHALLENGE_IFRAME_SELECTOR).bounding_box()
+                before = challenge.evaluate("() => document.querySelector('canvas').toDataURL()")
+                for (px, py) in out.get("clicks", []):
+                    ax = iframe_box["x"] + cap["rect"]["x"] + px / scale
+                    ay = iframe_box["y"] + cap["rect"]["y"] + (py + top) / scale
                     page.mouse.click(ax, ay)
-                    time.sleep(0.4)
+                    time.sleep(0.35)
+                after = challenge.evaluate("() => document.querySelector('canvas').toDataURL()")
+                rec["clicks_registered"] = (before != after)
+                if out.get("drag"):
+                    rec["note_drag"] = f"{len(out['drag'])} 个拖拽指令未执行（待实现）"
+
                 challenge.evaluate(
                     "() => { const b=document.querySelector('.button-submit'); if(b) b.click(); }")
                 time.sleep(2)
@@ -164,6 +185,12 @@ def run_trial(idx: int, solver, attempt_canvas: bool) -> dict:
                     "() => { const e=document.querySelector('.display-error');"
                     " return e && e.offsetParent!==null ? e.innerText : null; }")
                 rec["hcaptcha_error"] = err
+                try:
+                    rec["token"] = solver._get_token(page)[:24] + "..."
+                    rec["solved"] = True
+                except Exception:
+                    rec["solved"] = False
+                return rec
             except Exception as e:
                 rec["canvas_error"] = f"{type(e).__name__}: {e}"
         else:
