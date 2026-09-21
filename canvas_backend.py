@@ -74,8 +74,11 @@ class MockBackend(CanvasBackend):
     """
     固定返回，用于端到端验证管线。
 
-    默认给出整图中央附近的若干点 —— 只为验证「拿到坐标 -> 点击 -> 提交 ->
+    默认给出整图中央附近的若干点 —— 只为验证「拿到坐标 -> 点击/拖拽 -> 提交 ->
     像素差分确认」这条路是通的，不代表任何解题能力。
+
+    题面里含 drag 关键词时改为返回一条拖拽指令，这样可以独立验证拖拽动作
+    是否被 canvas 接收（拖拽题用点击是测不出来的）。
     """
 
     name = "mock"
@@ -85,11 +88,17 @@ class MockBackend(CanvasBackend):
 
     def solve(self, image: Image.Image, prompt: str) -> dict:
         w, h = self._to_pil(image).size
+        low = (prompt or "").lower()
+        if "drag" in low or "into their outlines" in low:
+            # 从左上区域拖到右下区域，路径横跨画面，便于像素差分观察
+            return {"clicks": [],
+                    "drag": [(w * 0.30, h * 0.35, w * 0.70, h * 0.70)],
+                    "confidence": None, "reasoning": "mock drag"}
         pts: List[Click] = []
         for i in range(self.n_points):
             frac = (i + 1) / (self.n_points + 1)
             pts.append((w * 0.5, h * (0.3 + 0.4 * frac)))
-        return {"clicks": pts, "drag": []}
+        return {"clicks": pts, "drag": [], "confidence": None, "reasoning": "mock click"}
 
 
 class OpenAICompatBackend(CanvasBackend):

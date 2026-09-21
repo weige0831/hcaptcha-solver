@@ -164,19 +164,22 @@ def run_trial(idx: int, solver, attempt_canvas: bool) -> dict:
                 rec["backend_reasoning"] = out.get("reasoning")
                 rec["backend_confidence"] = out.get("confidence")
 
-                # 换算：后端坐标(图像像素) -> canvas 缓冲 -> CSS -> 页面
-                scale = cap["buf"]["w"] / cap["rect"]["w"]
-                iframe_box = page.query_selector(CHALLENGE_IFRAME_SELECTOR).bounding_box()
                 before = challenge.evaluate("() => document.querySelector('canvas').toDataURL()")
-                for (px, py) in out.get("clicks", []):
-                    ax = iframe_box["x"] + cap["rect"]["x"] + px / scale
-                    ay = iframe_box["y"] + cap["rect"]["y"] + (py + top) / scale
-                    page.mouse.click(ax, ay)
-                    time.sleep(0.35)
+
+                # 换算 + 执行（点击与拖拽都走 canvas_actions）
+                from canvas_actions import CanvasGeometry, execute_plan
+                iframe_box = page.query_selector(CHALLENGE_IFRAME_SELECTOR).bounding_box()
+                geom = CanvasGeometry(iframe_box, cap["rect"], (cap["buf"]["w"], cap["buf"]["h"]))
+                rec["scale"] = round(geom.scale, 3)
+
+                # 后端拿到的是裁掉顶部后的图，拖拽/点击坐标需补回完整 canvas 坐标系
+                plan = {"clicks": out.get("clicks", []), "drag": out.get("drag", [])}
+                rec["backend_drag"] = [list(map(round, d)) for d in plan["drag"]]
+                executed = execute_plan(page, geom, plan, drag_offset_y=float(top))
+                rec["executed"] = executed
+
                 after = challenge.evaluate("() => document.querySelector('canvas').toDataURL()")
                 rec["clicks_registered"] = (before != after)
-                if out.get("drag"):
-                    rec["note_drag"] = f"{len(out['drag'])} 个拖拽指令未执行（待实现）"
 
                 challenge.evaluate(
                     "() => { const b=document.querySelector('.button-submit'); if(b) b.click(); }")
