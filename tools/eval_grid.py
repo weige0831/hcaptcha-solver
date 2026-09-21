@@ -210,6 +210,28 @@ def main():
                     geom = CanvasGeometry(iframe_box, cap["rect"], (cap["buf"]["w"], cap["buf"]["h"]))
                     top = diag.pop("top", 0)
                     rec = {"trial": tried, **diag, "prompt": prompt}
+
+                    # 保存本次挑战图与候选位置，供事后离线复查。
+                    # 之前没存 → live 失败无法分析，这正是"离线估的命中率解释不了 0/13"
+                    # 时无法判断是估计偏差还是 live 另有失败的原因。补上这个仪器缺口。
+                    try:
+                        tdir = os.path.join(OUT, f"trial_{tried:02d}")
+                        os.makedirs(tdir, exist_ok=True)
+                        with open(os.path.join(tdir, "canvas.png"), "wb") as f:
+                            f.write(raw)
+                        import cv2 as _cv2
+                        vis = arr[top:, :, :3].copy()
+                        picked = []
+                        for (bx, by) in pts:
+                            picked.append([int(bx), int(by)])
+                            _cv2.drawMarker(vis, (int(bx), int(by)),
+                                            (255, 0, 255), _cv2.MARKER_CROSS, 30, 4)
+                        Image.fromarray(vis).save(os.path.join(tdir, "picks.png"))
+                        rec["saved_dir"] = os.path.basename(tdir)
+                        rec["picked_positions"] = picked
+                    except Exception as _e:
+                        rec["save_error"] = f"{type(_e).__name__}: {_e}"
+
                     for (bx, by) in pts:
                         px, py = geom.to_page(bx, by + top)
                         page.mouse.move(px, py)
